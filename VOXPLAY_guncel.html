@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>VOXPLAY – Otomatik Türkçe Dublaj</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;padding:16px;background:#10131a;color:#f4f6fb;font:16px system-ui,sans-serif}
+main{max-width:720px;margin:auto}h1{font-size:27px;margin:4px 0 6px}
+p,small{color:#c2c9d6;line-height:1.45}
+button,select{font:inherit;border:0;border-radius:12px;padding:13px 15px;background:#315fe8;color:white;font-weight:650}
+button:disabled{opacity:.45}.secondary{background:#303847}
+.row{display:flex;gap:9px;flex-wrap:wrap;margin:12px 0}
+.preview{height:36vh;min-height:210px;max-height:380px;background:#000;border-radius:14px;overflow:hidden}
+video{width:100%;height:100%;object-fit:contain;display:block}
+.panel{background:#1b2230;border:1px solid #30394a;border-radius:14px;padding:14px;margin:13px 0}
+.label{font-size:13px;color:#9eacc1;text-transform:uppercase;letter-spacing:.06em}
+#english{font-size:18px;min-height:30px}#turkish{font-size:22px;min-height:40px;color:#a9c2ff}
+#status{white-space:pre-wrap;color:#ffd78b;font-size:14px}
+input[type=range]{width:100%;accent-color:#7193ff}
+</style>
+</head>
+<body><main>
+<h1>🎮 VOXPLAY</h1>
+<p>Altyazıyı otomatik algılar, Türkçeye çevirir ve seçilen Türkçe sesle okur.</p>
+<div class="row">
+<button id="start">Kamerayı aç</button>
+<button id="auto" class="secondary" disabled>Otomatik dublajı başlat</button>
+<button id="stop" class="secondary" disabled>Durdur</button>
+</div>
+<div class="preview"><video id="video" autoplay playsinline muted></video></div>
+<div class="panel">
+<label><small>Kamera yakınlaştırma: <b id="zoomVal">1.0</b>x</small></label>
+<input id="zoom" type="range" min="1" max="4" step=".1" value="1">
+<small>Altyazı ekranda küçükse yakınlaştırmayı artır.</small>
+</div>
+<div class="panel"><div class="label">Algılanan İngilizce</div><div id="english">Henüz altyazı okunmadı.</div></div>
+<div class="panel">
+<div class="label">Türkçe çeviri</div><div id="turkish">Çeviri burada görünecek.</div>
+<div class="row"><button id="again" class="secondary" disabled>Son çeviriyi tekrar dinle</button></div>
+<label><small>Ses hızı: <span id="rateVal">1.0</span>x</small><input id="rate" type="range" min=".8" max="1.15" step=".05" value="1"></label>
+<label style="display:block;margin-top:12px"><small>Kadın karakter sesi</small><select id="femaleVoice" style="width:100%;margin-top:5px"></select></label>
+<label style="display:block;margin-top:10px"><small>Erkek karakter sesi</small><select id="maleVoice" style="width:100%;margin-top:5px"></select></label>
+<small id="voiceInfo">Cihazın Türkçe sesleri yükleniyor…</small>
+</div>
+<div class="panel"><div class="label">Konuşmacı</div><div id="speakerStatus">Konuşmacı adı bulunursa karakter profili seçilir. Bulunamazsa varsayılan kadın sesi kullanılır.</div></div>
+<div class="panel"><div class="label">Durum</div><div id="status">Hazır. Önce kamerayı aç.</div></div>
+<p><small>Not: İlk kullanımda kamera ve ses için düğmelere basarak izin vermelisin. Bu sürüm, cihazda bulunan Türkçe sistem seslerini kullanır. Harici bir ses kaydını birebir özel ses olarak kullanmak için ayrıca ses sağlayıcısı/API bağlantısı gerekir.</small></p>
+<canvas id="canvas" hidden></canvas>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+let stream=null,worker=null,loopOn=false,busy=false,lastKey='',lastTurkish='',voices=[];
+let pendingKey='',pendingCount=0,lastSpokenAt=0;
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function status(message){$('status').textContent=message}
+function loadVoices(){
+  voices=speechSynthesis.getVoices()||[];
+  const tr=voices.filter(v=>(v.lang||'').toLowerCase().startsWith('tr'));
+  function fill(id,pattern){
+    const el=$(id),old=el.value;el.innerHTML='';
+    if(!tr.length){const o=document.createElement('option');o.value='';o.textContent='Türkçe ses bulunamadı';el.appendChild(o);return}
+    tr.forEach(v=>{const o=document.createElement('option');o.value=v.name;o.textContent=`${v.name} (${v.lang})`;el.appendChild(o)});
+    el.value=tr.some(v=>v.name===old)?old:(tr.find(v=>pattern.test(v.name))||tr[0]).name;
+  }
+  fill('femaleVoice',/female|woman|kadın|seda|yelda|filiz|emel|defne/i);
+  fill('maleVoice',/male|man|erkek|ahmet|mehmet|ali|cem|tolga/i);
+  $('voiceInfo').textContent=tr.length?`${tr.length} Türkçe sistem sesi bulundu.`:'Türkçe ses bulunamadı. iPhone Ayarlar > Erişilebilirlik > Sesli İçerik bölümünden Türkçe sesleri kontrol et.';
+}
+loadVoices();speechSynthesis.onvoiceschanged=loadVoices;
+$('rate').addEventListener('input',()=> $('rateVal').textContent=Number($('rate').value).toFixed(2).replace(/0+$/,'').replace(/\.$/,''));
+$('zoom').addEventListener('input',()=>{$('zoomVal').textContent=Number($('zoom').value).toFixed(1)});
+function chooseVoice(gender){
+  const name=$(gender==='male'?'maleVoice':'femaleVoice').value;
+  return voices.find(v=>v.name===name)||voices.find(v=>(v.lang||'').toLowerCase().startsWith('tr'))||null;
+}
+function speak(text,gender='female'){
+  if(!text)return;
+  try{
+    speechSynthesis.cancel();
+    const utterance=new SpeechSynthesisUtterance(text);
+    utterance.lang='tr-TR';utterance.rate=Number($('rate').value)||1;
+    const voice=chooseVoice(gender);if(voice)utterance.voice=voice;
+    utterance.onstart=()=>status('Seslendirme başladı.');
+    utterance.onerror=e=>status('Seslendirme hatası: '+(e.error||'Bilinmeyen hata'));
+    speechSynthesis.speak(utterance);lastSpokenAt=Date.now();
+  }catch(e){status('Ses başlatılamadı: '+e.message)}
+}
+$('start').onclick=async()=>{
+  try{
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error('Kamera erişimi yok. Siteyi HTTPS üzerinden aç.');
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    $('video').srcObject=stream;await $('video').play();
+    $('auto').disabled=false;$('stop').disabled=false;
+    status('Kamera açık. Altyazıyı görüntünün alt-orta bölümüne getir.');
+  }catch(e){status('Kamera açılamadı: '+e.message+'. Safari site ayarlarından kamera iznini kontrol et.')}
+};
+$('stop').onclick=()=>{
+  loopOn=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;
+  $('video').srcObject=null;$('auto').disabled=true;$('stop').disabled=true;
+  speechSynthesis.cancel();status('Durduruldu.');
+};
+async function getWorker(){
+  if(!worker){status('İngilizce yazı tanıma motoru indiriliyor…');worker=await Tesseract.createWorker('eng',1,{logger:m=>{if(m.status==='recognizing text')status('Altyazı taranıyor…')}})}
+  return worker;
+}
+function cleanText(raw){
+  return String(raw||'').replace(/\r/g,'\n').split('\n')
+    .map(s=>s.replace(/\s+/g,' ').trim())
+    .filter(s=>s&&!/^\[[^\]]*\]$/.test(s)&&!/^\([^)]*\)$/.test(s))
+    .join(' ').replace(/^[^A-Za-z]+|[^A-Za-z.!?']+$/g,'')
+    .replace(/\s+/g,' ').trim();
+}
+function candidateFromOCR(result,crop){
+  const data=result.data||{};
+  const lines=(data.lines||[]).filter(line=>{
+    const b=line.bbox||{},t=String(line.text||'').trim();
+    if(t.length<2)return false;
+    const cx=((b.x0||0)+(b.x1||crop.width))/2;
+    const cy=((b.y0||0)+(b.y1||crop.height))/2;
+    return cx>crop.width*.04&&cx<crop.width*.96&&cy>crop.height*.08&&cy<crop.height*.98&&
+      (b.x1-b.x0)>crop.width*.025&&Number(line.confidence??data.confidence??0)>=35;
+  });
+  const raw=lines.map(x=>x.text).join('\n');
+  const text=cleanText(raw);
+  if(text.length<5||text.length>220||!/[A-Za-z]{2}/.test(text))return null;
+  if(/\b(press|hold|mission|objective|checkpoint|wanted level|weapon wheel|settings|loading|save game|new game|paused|resume|select option)\b/i.test(text))return null;
+  return {raw,text};
+}
+async function translate(text){
+  const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q='+encodeURIComponent(text);
+  const response=await fetch(url);
+  if(!response.ok)throw new Error('Çeviri servisine ulaşılamadı.');
+  const data=await response.json();
+  const result=(data[0]||[]).map(part=>part[0]||'').join('').trim();
+  if(!result)throw new Error('Çeviri boş döndü.');
+  return result;
+}
+function identifyGender(raw){
+  const t=String(raw||'').toLowerCase();
+  if(/\b(jason|cal hampton|boobie ike|raul|brian heder|wyman|mendez|andres|raymond)\b/i.test(t))return 'male';
+  if(/\b(lucia|bae.?luxe|roxy|lori heder|stefanie|petra|valentina|hammer lady)\b/i.test(t))return 'female';
+  return 'female';
+}
+async function scanOnce(){
+  if(busy||!$('video').videoWidth)return;
+  busy=true;
+  try{
+    const video=$('video'),zoom=Number($('zoom').value)||1;
+    const vw=video.videoWidth,vh=video.videoHeight,sw=vw/zoom,sh=vh/zoom;
+    const sourceX=(vw-sw)/2,sourceY=(vh-sh)/2;
+    const canvas=$('canvas');canvas.width=1280;canvas.height=Math.round(1280*sh/sw);
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(video,sourceX,sourceY,sw,sh,0,0,canvas.width,canvas.height);
+    const crop=document.createElement('canvas');
+    crop.width=Math.floor(canvas.width*.94);crop.height=Math.floor(canvas.height*.48);
+    crop.getContext('2d').drawImage(canvas,Math.floor(canvas.width*.03),Math.floor(canvas.height*.50),crop.width,crop.height,0,0,crop.width,crop.height);
+    const ocr=await (await getWorker()).recognize(crop);
+    const found=candidateFromOCR(ocr,crop);
+    if(!found){pendingKey='';pendingCount=0;return}
+    $('english').textContent=found.text;
+    const key=found.text.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
+    if(key===lastKey)return;
+    if(key===pendingKey)pendingCount++;else{pendingKey=key;pendingCount=1}
+    if(pendingCount<2)return;
+    pendingKey='';pendingCount=0;lastKey=key;
+    status('Altyazı doğrulandı. Türkçeye çevriliyor…');
+    const translated=await translate(found.text);
+    const spoken=translated.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
+    if(!spoken)throw new Error('Okunacak çeviri bulunamadı.');
+    lastTurkish=spoken;$('turkish').textContent=spoken;$('again').disabled=false;
+    const gender=identifyGender(found.raw);
+    $('speakerStatus').textContent='Konuşmacı adı net değilse varsayılan kadın sesi kullanılır.';
+    status('Çeviri hazır. Seslendiriliyor…');
+    speak(spoken,gender);
+  }catch(e){status('Hata: '+e.message);if(lastKey&&Date.now()-lastSpokenAt>5000)lastKey=''}
+  finally{busy=false}
+}
+async function runLoop(){while(loopOn){await scanOnce();await sleep(500)}}
+$('auto').onclick=()=>{
+  if(!$('video').videoWidth){status('Önce kamerayı aç.');return}
+  if(loopOn)return;
+  // iOS Safari requires speech synthesis to be initiated from a user gesture.
+  speechSynthesis.cancel();
+  const unlock=new SpeechSynthesisUtterance('');unlock.lang='tr-TR';speechSynthesis.speak(unlock);
+  loopOn=true;$('auto').disabled=true;
+  status('Otomatik tarama başladı. Altyazı bulunduğunda çeviri ve seslendirme otomatik yapılacak.');
+  runLoop();
+};
+$('again').onclick=()=>{if(lastTurkish)speak(lastTurkish,'female')};
+</script></body></html>
